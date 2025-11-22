@@ -1,0 +1,229 @@
+{
+  "name": "Markdown-to-Outline Sync - File Event Processor",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "markdown-file-event",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "markdown-file-event-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract file event data from webhook\nconst eventData = $input.first().json;\n\n// Validate required fields\nif (!eventData.filePath || !eventData.eventType) {\n  throw new Error('Missing required fields: filePath and eventType');\n}\n\n// Extract metadata\nconst filePath = eventData.filePath;\nconst eventType = eventData.eventType;\nconst timestamp = new Date().toISOString();\n\n// Parse file path to extract information\nconst pathParts = filePath.split('/').filter(part => part.length > 0);\nconst fileName = pathParts[pathParts.length - 1];\nconst directory = pathParts.slice(0, -1).join('/');\n\n// Extract category from directory structure\nconst category = pathParts[1] || 'general';\nconst subcategory = pathParts[2] || '';\n\n// Generate unique event ID\nconst eventId = `evt_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;\n\nreturn {\n  eventId,\n  filePath,\n  fileName,\n  directory,\n  eventType,\n  category,\n  subcategory,\n  timestamp,\n  processed: false,\n  retryCount: 0\n};"
+      },
+      "id": "event-validator",
+      "name": "Event Validator & Parser",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.eventType }}",
+              "operation": "equals",
+              "value2": "CREATE"
+            }
+          ]
+        }
+      },
+      "id": "file-filter",
+      "name": "File Type & Event Filter",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.fileName }}",
+              "operation": "endsWith",
+              "value2": ".md"
+            }
+          ]
+        }
+      },
+      "id": "markdown-check",
+      "name": "Markdown File Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Add to processing queue\nconst eventData = $input.first().json;\nconst queueData = {\n  ...eventData,\n  queueTimestamp: new Date().toISOString(),\n  priority: getPriority(eventData.category),\n  estimatedProcessingTime: estimateProcessingTime(eventData.filePath)\n};\n\nfunction getPriority(category) {\n  const priorityMap = {\n    'projects': 1,\n    'guides': 2,\n    'technical': 1,\n    'personal': 3,\n    'research': 2\n  };\n  return priorityMap[category] || 3;\n}\n\nfunction estimateProcessingTime(filePath) {\n  // Simple estimation based on file size and complexity\n  // This would be enhanced with actual file analysis\n  return 2000; // milliseconds\n}\n\nreturn queueData;"
+      },
+      "id": "queue-processor",
+      "name": "Queue Processor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "url": "={{ $workflow.settings.markdownProcessorWebhook }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Event-Type",
+              "value": "file-event"
+            },
+            {
+              "name": "X-Source",
+              "value": "file-monitor"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "trigger-processor",
+      "name": "Trigger Document Processor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "responseBody": "={\n  \"status\": \"accepted\",\n  \"eventId\": \"{{ $json.eventId }}\",\n  \"message\": \"File event queued for processing\",\n  \"estimatedProcessingTime\": \"{{ $json.estimatedProcessingTime }}\"\n}",
+        "responseCode": 202
+      },
+      "id": "success-response",
+      "name": "Success Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "responseBody": "={\n  \"status\": \"rejected\",\n  \"reason\": \"Invalid file type or event\",\n  \"acceptedTypes\": [\".md\"],\n  \"acceptedEvents\": [\"CREATE\", \"MODIFY\", \"DELETE\"]\n}",
+        "responseCode": 400
+      },
+      "id": "error-response",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [1120, 400]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Event Validator & Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Event Validator & Parser": {
+      "main": [
+        [
+          {
+            "node": "File Type & Event Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "File Type & Event Filter": {
+      "main": [
+        [
+          {
+            "node": "Markdown File Check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Markdown File Check": {
+      "main": [
+        [
+          {
+            "node": "Queue Processor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue Processor": {
+      "main": [
+        [
+          {
+            "node": "Trigger Document Processor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Document Processor": {
+      "main": [
+        [
+          {
+            "node": "Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "UTC",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "markdownProcessorWebhook": "https://n8n.sashi.online/webhook/markdown-processor"
+  },
+  "staticData": {},
+  "tags": [
+    {
+      "createdAt": "2025-11-16T02:52:22.000Z",
+      "updatedAt": "2025-11-16T02:52:22.000Z",
+      "id": "markdown-sync",
+      "name": "markdown-sync"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-16T02:52:22.000Z",
+  "versionId": "1"
+}

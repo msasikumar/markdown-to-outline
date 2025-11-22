@@ -1,0 +1,379 @@
+{
+  "name": "Markdown-to-Outline Sync - Document Processor",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "markdown-processor",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "markdown-processor-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse and validate input data\nconst inputData = $input.first().json;\n\n// Expected format from file-event-processor\nconst {\n  eventId,\n  filePath,\n  fileName,\n  directory,\n  eventType,\n  category,\n  subcategory,\n  timestamp\n} = inputData;\n\n// Validate required fields\nif (!filePath || !eventType) {\n  throw new Error('Missing required fields in webhook payload');\n}\n\n// Initialize processing context\nconst processingContext = {\n  eventId,\n  filePath,\n  fileName,\n  directory,\n  eventType,\n  category,\n  subcategory,\n  timestamp,\n  startTime: new Date().toISOString(),\n  status: 'processing',\n  errors: [],\n  warnings: []\n};\n\nreturn processingContext;"
+      },
+      "id": "input-validator",
+      "name": "Input Validator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "command": "cat",
+        "parameters": "={{ $json.filePath }}",
+        "options": {}
+      },
+      "id": "read-file",
+      "name": "Read File Content",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract metadata from markdown file\nconst fileContent = $input.first().json.stdout || $input.first().json.stderr;\nconst context = $input.first().json.context || $input.first().json;\n\nif (!fileContent) {\n  throw new Error('No file content received');\n}\n\n// Parse front matter using gray-matter style parsing\nconst frontMatterRegex = /^---\\s*\\n([\\s\\S]*?)\\n---\\s*\\n([\\s\\S]*)$/;\nconst match = fileContent.match(frontMatterRegex);\n\nlet metadata = {};\nlet content = fileContent;\n\nif (match) {\n  // Parse YAML front matter\n  const frontMatterText = match[1];\n  content = match[2];\n  \n  try {\n    // Simple YAML parser for basic key-value pairs\n    const lines = frontMatterText.split('\\n');\n    lines.forEach(line => {\n      const colonIndex = line.indexOf(':');\n      if (colonIndex > 0) {\n        const key = line.substring(0, colonIndex).trim();\n        let value = line.substring(colonIndex + 1).trim();\n        \n        // Handle arrays\n        if (value.startsWith('[') && value.endsWith(']')) {\n          value = value.slice(1, -1).split(',').map(v => v.trim().replace(/['\\\"']/g, ''));\n        }\n        // Handle strings\n        else if ((value.startsWith('\"') && value.endsWith('\"')) || \n                 (value.startsWith(\"'\") && value.endsWith(\"'\"))) {\n          value = value.slice(1, -1);\n        }\n        \n        metadata[key] = value;\n      }\n    });\n  } catch (error) {\n    context.warnings.push(`Failed to parse front matter: ${error.message}`);\n  }\n}\n\n// Extract title from content if not in metadata\nlet title = metadata.title;\nif (!title) {\n  const titleMatch = content.match(/^#\\s+(.+)$/m);\n  if (titleMatch) {\n    title = titleMatch[1].trim();\n  } else {\n    // Use filename without extension\n    title = context.fileName.replace(/\\.md$/, '').replace(/[-_]/g, ' ');\n  }\n}\n\n// Generate outline data\nconst outlineData = {\n  title,\n  content,\n  metadata: {\n    ...metadata,\n    originalFile: context.filePath,\n    eventId: context.eventId,\n    category: context.category,\n    subcategory: context.subcategory,\n    processedAt: new Date().toISOString()\n  }\n};\n\nreturn {\n  ...context,\n  outlineData,\n  contentLength: content.length,\n  metadataFields: Object.keys(metadata).length\n};"
+      },
+      "id": "content-parser",
+      "name": "Parse Markdown Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Determine target collection based on metadata and directory structure\nconst outlineData = $input.first().json.outlineData;\nconst context = $input.first().json;\n\n// Collection mapping logic\nfunction getCollectionMapping(metadata, category, subcategory) {\n  const collectionMap = {\n    'projects': 'Projects',\n    'guides': 'Guides',\n    'technical': 'Technical Documentation',\n    'personal': 'Personal Notes',\n    'research': 'Research'\n  };\n  \n  // Check metadata first\n  if (metadata.collection) {\n    return metadata.collection;\n  }\n  \n  // Default to category mapping\n  return collectionMap[category] || 'General';\n}\n\n// Determine document hierarchy\nfunction getDocumentHierarchy(metadata, subcategory) {\n  if (metadata.parent_doc) {\n    return {\n      parentDocumentId: metadata.parent_doc\n    };\n  }\n  \n  // Create hierarchy based on directory structure\n  if (subcategory) {\n    return {\n      parentDocumentTitle: subcategory.replace(/[-_]/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase())\n    };\n  }\n  \n  return {};\n}\n\nconst collectionName = getCollectionMapping(outlineData.metadata, context.category, context.subcategory);\nconst hierarchy = getDocumentHierarchy(outlineData.metadata, context.subcategory);\n\nreturn {\n  ...context,\n  outlineData: {\n    ...outlineData,\n    collectionName,\n    ...hierarchy\n  }\n};"
+      },
+      "id": "collection-mapper",
+      "name": "Map to Collection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "url": "={{ $workflow.settings.outlineApiUrl }}/api/collections.list",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $workflow.settings.outlineApiKey }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "fetch-collections",
+      "name": "Fetch Outline Collections",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Find or create target collection\nconst collectionsResponse = $input.first().json;\nconst context = $input.first().json.context || $input.first().json;\n\n// Extract collections from response\nconst collections = collectionsResponse.data?.collections || collectionsResponse.collections || [];\nconst targetCollectionName = context.outlineData.collectionName;\n\n// Find existing collection\nlet targetCollection = collections.find(col => col.name === targetCollectionName);\n\nif (!targetCollection) {\n  // Will be created via API\n  context.warnings.push(`Collection '${targetCollectionName}' will be created`);\n  targetCollection = { name: targetCollectionName, id: null };\n}\n\n// Prepare document data for Outline\nconst documentData = {\n  title: context.outlineData.title,\n  content: context.outlineData.content,\n  collectionId: targetCollection.id,\n  parentDocumentId: context.outlineData.parentDocumentId || null,\n  metadata: {\n    sourceFile: context.filePath,\n    category: context.category,\n    subcategory: context.subcategory,\n    originalMetadata: context.outlineData.metadata\n  }\n};\n\nreturn {\n  ...context,\n  targetCollection,\n  documentData\n};"
+      },
+      "id": "prepare-document",
+      "name": "Prepare Document Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.targetCollection.id }}",
+              "operation": "notExists"
+            }
+          ]
+        }
+      },
+      "id": "collection-check",
+      "name": "Collection Exists Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "url": "={{ $workflow.settings.outlineApiUrl }}/api/collections.create",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $workflow.settings.outlineApiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={\n  \"name\": \"{{ $json.targetCollection.name }}\",\n  \"description\": \"Auto-created collection for {{ $json.targetCollection.name }} documents\",\n  \"permission\": null\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "create-collection",
+      "name": "Create Collection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract new collection ID and update document data\nconst createResponse = $input.first().json;\nconst context = $input.first().json.context || $input.first().json;\n\nif (createResponse.data?.collection || createResponse.collection) {\n  const newCollection = createResponse.data?.collection || createResponse.collection;\n  context.documentData.collectionId = newCollection.id;\n  context.targetCollection = newCollection;\n  \n  return {\n    ...context,\n    collectionCreated: true\n  };\n} else {\n  throw new Error('Failed to create collection - no collection data in response');\n}"
+      },
+      "id": "update-collection-id",
+      "name": "Update Collection ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "url": "={{ $workflow.settings.outlineApiUrl }}/api/documents.create",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $workflow.settings.outlineApiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({\n  title: $json.documentData.title,\n  content: $json.documentData.content,\n  collectionId: $json.documentData.collectionId,\n  parentDocumentId: $json.documentData.parentDocumentId || null,\n  publish: true\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "create-document",
+      "name": "Create/Update Document",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate audit log and summary\nconst documentResponse = $input.first().json;\nconst context = $input.first().json.context || $input.first().json;\n\nconst endTime = new Date().toISOString();\nconst processingDuration = new Date(endTime) - new Date(context.startTime);\n\nif (documentResponse.data?.document || documentResponse.document) {\n  const document = documentResponse.data?.document || documentResponse.document;\n  \n  const auditLog = {\n    timestamp: new Date().toISOString(),\n    eventId: context.eventId,\n    eventType: 'document_sync',\n    status: 'success',\n    source: {\n      filePath: context.filePath,\n      fileName: context.fileName,\n      category: context.category,\n      subcategory: context.subcategory\n    },\n    target: {\n      outlineId: document.id,\n      outlineUrl: document.url,\n      collection: context.targetCollection.name,\n      collectionId: context.targetCollection.id\n    },\n    processing: {\n      startTime: context.startTime,\n      endTime: endTime,\n      durationMs: processingDuration,\n      contentLength: context.contentLength,\n      metadataFields: context.metadataFields,\n      collectionCreated: context.collectionCreated || false\n    },\n    warnings: context.warnings,\n    errors: context.errors\n  };\n  \n  const summary = {\n    status: 'success',\n    message: 'Document synchronized successfully',\n    documentId: document.id,\n    documentUrl: document.url,\n    processingTime: `${processingDuration}ms`,\n    collection: context.targetCollection.name\n  };\n  \n  return {\n    ...context,\n    auditLog,\n    summary\n  };\n} else {\n  throw new Error('Failed to create document - no document data in response');\n}"
+      },
+      "id": "generate-audit-log",
+      "name": "Generate Audit Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2660, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "responseBody": "={{ JSON.stringify($json.summary) }}",
+        "responseCode": 200
+      },
+      "id": "success-response",
+      "name": "Success Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [2880, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "responseBody": "={{ JSON.stringify({\n  status: 'error',\n  error: 'Failed to process document',\n  eventId: $json.eventId,\n  details: JSON.stringify($json.errors)\n}) }}",
+        "responseCode": 500
+      },
+      "id": "error-response",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [1780, 500]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Input Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Input Validator": {
+      "main": [
+        [
+          {
+            "node": "Read File Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read File Content": {
+      "main": [
+        [
+          {
+            "node": "Parse Markdown Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Markdown Content": {
+      "main": [
+        [
+          {
+            "node": "Map to Collection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map to Collection": {
+      "main": [
+        [
+          {
+            "node": "Fetch Outline Collections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Outline Collections": {
+      "main": [
+        [
+          {
+            "node": "Prepare Document Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Document Data": {
+      "main": [
+        [
+          {
+            "node": "Collection Exists Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collection Exists Check": {
+      "main": [
+        [
+          {
+            "node": "Create Collection",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create/Update Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Collection": {
+      "main": [
+        [
+          {
+            "node": "Update Collection ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Collection ID": {
+      "main": [
+        [
+          {
+            "node": "Create/Update Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create/Update Document": {
+      "main": [
+        [
+          {
+            "node": "Generate Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Audit Log": {
+      "main": [
+        [
+          {
+            "node": "Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "UTC",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "outlineApiUrl": "https://outline.sashi.online",
+    "outlineApiKey": "{{ $env.OUTLINE_API_KEY }}"
+  },
+  "staticData": {},
+  "tags": [
+    {
+      "createdAt": "2025-11-16T02:52:22.000Z",
+      "updatedAt": "2025-11-16T02:52:22.000Z",
+      "id": "markdown-sync",
+      "name": "markdown-sync"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-16T02:52:22.000Z",
+  "versionId": "1"
+}

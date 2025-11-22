@@ -1,0 +1,352 @@
+{
+  "name": "Markdown-to-Outline Sync - Batch Processor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "cronExpression": "0 */6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "url": "={{ $workflow.settings.fileSystemApiUrl }}/api/scan-directory",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $workflow.settings.monitoringApiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={\n  \"scanPath\": \"/documents\",\n  \"recursive\": true,\n  \"filePattern\": \"*.md\",\n  \"excludePatterns\": [\".git\", \"node_modules\", \".cache\"],\n  \"sinceLastScan\": true\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "scan-directories",
+      "name": "Scan Directory Structure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process scan results and group files by collection\nconst scanResults = $input.first().json;\nconst batchContext = {\n  batchId: `batch_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,\n  startTime: new Date().toISOString(),\n  scanResults,\n  filesFound: 0,\n  filesToProcess: [],\n  collectionGroups: {},\n  processingStats: {\n    totalProcessed: 0,\n    successful: 0,\n    failed: 0,\n    skipped: 0\n  }\n};\n\nif (scanResults.files && Array.isArray(scanResults.files)) {\n  batchContext.filesFound = scanResults.files.length;\n  \n  // Filter and categorize files\n  const validFiles = scanResults.files.filter(file => {\n    return file.isModified && \n           file.extension === '.md' && \n           file.size > 0 &&\n           !file.isHidden;\n  });\n  \n  batchContext.filesToProcess = validFiles;\n  \n  // Group by collection for efficient processing\n  validFiles.forEach(file => {\n    const collection = categorizeFile(file);\n    if (!batchContext.collectionGroups[collection]) {\n      batchContext.collectionGroups[collection] = [];\n    }\n    batchContext.collectionGroups[collection].push(file);\n  });\n  \n  function categorizeFile(file) {\n    const pathParts = file.path.split('/').filter(part => part.length > 0);\n    const category = pathParts[1] || 'general';\n    return category;\n  }\n}\n\nreturn batchContext;"
+      },
+      "id": "process-scan-results",
+      "name": "Process Scan Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.filesToProcess.length }}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "check-files-available",
+      "name": "Check Files Available",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create batches for efficient processing\nconst batchContext = $input.first().json;\nconst batchSize = 10; // Process 10 files at a time\nconst batches = [];\n\nfor (let i = 0; i < batchContext.filesToProcess.length; i += batchSize) {\n  const batch = {\n    batchNumber: Math.floor(i / batchSize) + 1,\n    files: batchContext.filesToProcess.slice(i, i + batchSize),\n    size: Math.min(batchSize, batchContext.filesToProcess.length - i)\n  };\n  batches.push(batch);\n}\n\n// Add batch processing metadata\nbatchContext.totalBatches = batches.length;\nbatchContext.batches = batches;\n\n// Log batch creation\nconsole.log(`Created ${batches.length} batches from ${batchContext.filesToProcess.length} files`);\n\nreturn batchContext;"
+      },
+      "id": "create-batches",
+      "name": "Create Processing Batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process a single batch of files\nconst batchContext = $input.first().json;\nconst currentBatch = $json;\n\n// Prepare batch for processing\nconst batchData = {\n  ...batchContext,\n  currentBatch,\n  processingStartTime: new Date().toISOString(),\n  batchResults: {\n    processed: 0,\n    successful: 0,\n    failed: 0,\n    skipped: 0\n  }\n};\n\nreturn batchData;"
+      },
+      "id": "prepare-batch",
+      "name": "Prepare Batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "url": "={{ $workflow.settings.documentProcessorWebhook }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Batch-Id",
+              "value": "={{ $json.batchId }}"
+            },
+            {
+              "name": "X-Batch-Number",
+              "value": "={{ $json.currentBatch.batchNumber }}"
+            },
+            {
+              "name": "X-Processing-Mode",
+              "value": "batch"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({\n  eventId: `${$json.batchId}_${$json.currentBatch.batchNumber}`,\n  filePath: $json.currentBatch.files[0].path,\n  fileName: $json.currentBatch.files[0].name,\n  directory: $json.currentBatch.files[0].directory,\n  eventType: 'BATCH_PROCESS',\n  category: 'batch',\n  subcategory: 'batch',\n  timestamp: new Date().toISOString(),\n  batchInfo: {\n    batchId: $json.batchId,\n    batchNumber: $json.currentBatch.batchNumber,\n    totalBatches: $json.totalBatches,\n    batchSize: $json.currentBatch.size,\n    filesInBatch: $json.currentBatch.files.length\n  }\n}) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "trigger-batch-processing",
+      "name": "Trigger Batch Processing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process batch results and update statistics\nconst batchResponse = $input.first().json;\nconst batchData = $input.first().json.context || $input.first().json;\n\nconst processingEndTime = new Date().toISOString();\nconst processingDuration = new Date(processingEndTime) - new Date(batchData.processingStartTime);\n\n// Update batch statistics\nbatchData.batchResults = {\n  processed: batchData.currentBatch.files.length,\n  successful: batchResponse.successful || 0,\n  failed: batchResponse.failed || 0,\n  skipped: batchResponse.skipped || 0,\n  duration: processingDuration\n};\n\n// Update overall processing statistics\nbatchData.processingStats.totalProcessed += batchData.batchResults.processed;\nbatchData.processingStats.successful += batchData.batchResults.successful;\nbatchData.processingStats.failed += batchData.batchResults.failed;\nbatchData.processingStats.skipped += batchData.batchResults.skipped;\n\n// Create batch summary\nconst batchSummary = {\n  batchId: batchData.batchId,\n  batchNumber: batchData.currentBatch.batchNumber,\n  processedFiles: batchData.batchResults.processed,\n  successful: batchData.batchResults.successful,\n  failed: batchData.batchResults.failed,\n  duration: processingDuration,\n  timestamp: processingEndTime\n};\n\nreturn {\n  ...batchData,\n  lastBatchSummary: batchSummary\n};"
+      },
+      "id": "update-batch-stats",
+      "name": "Update Batch Statistics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate comprehensive batch processing report\nconst batchData = $input.first().json;\nconst endTime = new Date().toISOString();\nconst totalDuration = new Date(endTime) - new Date(batchData.startTime);\n\nconst report = {\n  batchId: batchData.batchId,\n  processingSummary: {\n    startTime: batchData.startTime,\n    endTime: endTime,\n    totalDuration: totalDuration,\n    totalFilesFound: batchData.filesFound,\n    totalFilesToProcess: batchData.filesToProcess.length,\n    totalBatches: batchData.totalBatches,\n    processingStats: batchData.processingStats\n  },\n  collectionsProcessed: Object.keys(batchData.collectionGroups),\n  performance: {\n    averageTimePerFile: totalDuration / batchData.filesToProcess.length,\n    filesPerMinute: (batchData.processingStats.successful / (totalDuration / 1000 / 60)).toFixed(2),\n    successRate: ((batchData.processingStats.successful / batchData.processingStats.totalProcessed) * 100).toFixed(2) + '%'\n  },\n  status: batchData.processingStats.failed > 0 ? 'completed_with_errors' : 'completed_successfully',\n  timestamp: endTime\n};\n\nreturn report;"
+      },
+      "id": "generate-report",
+      "name": "Generate Batch Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "url": "={{ $workflow.settings.monitoringWebhook }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Event-Type",
+              "value": "batch-completion"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "send-notification",
+      "name": "Send Completion Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2220, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "responseCode": 200
+      },
+      "id": "success-response",
+      "name": "Success Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [2440, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "responseBody": "={\n  \"message\": \"No files found to process\",\n  \"batchId\": \"{{ $json.batchId }}\",\n  \"status\": \"no_action_needed\"\n}",
+        "responseCode": 200
+      },
+      "id": "no-files-response",
+      "name": "No Files Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [1120, 400]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Scan Directory Structure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scan Directory Structure": {
+      "main": [
+        [
+          {
+            "node": "Process Scan Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Scan Results": {
+      "main": [
+        [
+          {
+            "node": "Check Files Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Files Available": {
+      "main": [
+        [
+          {
+            "node": "Create Processing Batches",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Files Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Processing Batches": {
+      "main": [
+        [
+          {
+            "node": "Prepare Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Batch": {
+      "main": [
+        [
+          {
+            "node": "Trigger Batch Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Batch Processing": {
+      "main": [
+        [
+          {
+            "node": "Update Batch Statistics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Batch Statistics": {
+      "main": [
+        [
+          {
+            "node": "Generate Batch Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Batch Report": {
+      "main": [
+        [
+          {
+            "node": "Send Completion Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Completion Notification": {
+      "main": [
+        [
+          {
+            "node": "Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "UTC",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "fileSystemApiUrl": "http://localhost:8080",
+    "monitoringApiKey": "{{ $env.MONITORING_API_KEY }}",
+    "documentProcessorWebhook": "https://n8n.sashi.online/webhook/markdown-processor",
+    "monitoringWebhook": "https://n8n.sashi.online/webhook/monitoring"
+  },
+  "staticData": {},
+  "tags": [
+    {
+      "createdAt": "2025-11-16T02:52:22.000Z",
+      "updatedAt": "2025-11-16T02:52:22.000Z",
+      "id": "markdown-sync",
+      "name": "markdown-sync"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-16T02:52:22.000Z",
+  "versionId": "1"
+}
